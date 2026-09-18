@@ -1,10 +1,7 @@
 {
     "mcpServers": {
         "terraform": {
-            "command": "/Users/lynicis/go/bin/terraform-mcp-server",
-            "args": [
-                "stdio"
-            ]
+            "command": "./.agents/bin/terraform-mcp"
         }
     }
 }

@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# Ensure Go bin directory is in PATH
+export PATH="$PATH:$HOME/go/bin:/usr/local/go/bin"
+
+# Check if Go is installed
+if ! command -v go >/dev/null 2>&1; then
+  echo "Error: 'go' is not installed. Please install Go first." >&2
+  exit 1
+fi
+
+# Only install if the binary is not already present
+if ! command -v terraform-mcp-server >/dev/null 2>&1; then
+  echo "Installing terraform-mcp-server..." >&2
+  go install github.com/hashicorp/terraform-mcp-server/cmd/terraform-mcp-server@latest
+fi
+
+exec terraform-mcp-server stdio
