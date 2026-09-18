@@ -1,0 +1,37 @@
+# ==============================================================================
+# WireGuard VPN on Azure - Example Configuration
+# ==============================================================================
+# Copy this file to `terraform.tfvars` and customize for your deployment:
+#   cp terraform.tfvars.example terraform.tfvars
+# ==============================================================================
+
+# Target Azure region
+# Sweden Central is recommended for lowest compute and egress costs in Azure Europe.
+# Other cost-effective EU alternatives: "northeurope" (Ireland), "polandcentral" (Poland), "germanywestcentral" (Germany)
+location = "swedencentral"
+
+# Dedicated resource group name
+resource_group_name = "rg-wireguard-vpn"
+
+# Virtual machine size
+# Standard_B1s (1 vCPU, 1 GiB RAM) provides an ideal balance of cost (~$5-7/month) and memory headroom for Ubuntu 24.04.
+# For higher throughput (>200 Mbps) or many concurrent peers, consider "Standard_B2s" (2 vCPU, 4 GiB RAM).
+vm_size = "Standard_B1s"
+
+# Linux VM administrator username
+admin_username = "azureuser"
+
+# SSH public key for the admin user (REQUIRED)
+# Replace with the contents of your public key (e.g. `cat ~/.ssh/id_ed25519.pub` or `cat ~/.ssh/id_rsa.pub`)
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxExamplePublicKeyStringDoNotUseAsIs admin@localhost"
+
+# WireGuard UDP listening port (default standard WireGuard port is 51820)
+wireguard_port = 51820
+
+# Allowed CIDR blocks for administrative SSH access (TCP port 22)
+# IMPORTANT: For security, restrict this to your public IP or office CIDR (e.g. ["203.0.113.50/32"]).
+# Leaving this as ["0.0.0.0/0"] exposes SSH to the public Internet.
+admin_ssh_allowed_cidrs = [
+  "0.0.0.0/0"
+  # "203.0.113.50/32" # Example: restrict to a specific static public IP
+]

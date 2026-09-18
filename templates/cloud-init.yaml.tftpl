@@ -1,0 +1,220 @@
+#cloud-config
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - wireguard
+  - wireguard-tools
+  - iptables
+  - qrencode
+  - curl
+
+write_files:
+  - path: /etc/sysctl.d/99-wireguard.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward = 1
+      net.ipv6.conf.all.forwarding = 1
+
+  - path: /usr/local/bin/init-wireguard.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      WG_DIR="/etc/wireguard"
+      CLIENTS_DIR="/home/${admin_username}/wireguard-clients"
+      mkdir -p "$WG_DIR" "$CLIENTS_DIR"
+      chmod 700 "$WG_DIR" "$CLIENTS_DIR"
+
+      # Apply sysctl settings
+      sysctl -p /etc/sysctl.d/99-wireguard.conf
+
+      # Detect default network interface
+      DEFAULT_NIC=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -n1)
+      if [ -z "$DEFAULT_NIC" ]; then
+        DEFAULT_NIC="eth0"
+      fi
+
+      # Server public IP resolution
+      SERVER_PUB_IP="${server_public_ip}"
+      if [ -z "$SERVER_PUB_IP" ] || [ "$SERVER_PUB_IP" = "null" ]; then
+        SERVER_PUB_IP=$(curl -s -4 ifconfig.me || curl -s -4 icanhazip.com || true)
+      fi
+
+      WG_PORT="${wireguard_port}"
+
+      # Generate server keys
+      if [ ! -f "$WG_DIR/server_private.key" ]; then
+        umask 077
+        wg genkey | tee "$WG_DIR/server_private.key" | wg pubkey > "$WG_DIR/server_public.key"
+      fi
+
+      SERVER_PRIV_KEY=$(cat "$WG_DIR/server_private.key")
+      SERVER_PUB_KEY=$(cat "$WG_DIR/server_public.key")
+
+      # Generate initial client (client1) keys
+      if [ ! -f "$WG_DIR/client1_private.key" ]; then
+        umask 077
+        wg genkey | tee "$WG_DIR/client1_private.key" | wg pubkey > "$WG_DIR/client1_public.key"
+      fi
+
+      CLIENT1_PRIV_KEY=$(cat "$WG_DIR/client1_private.key")
+      CLIENT1_PUB_KEY=$(cat "$WG_DIR/client1_public.key")
+
+      # Generate wg0.conf
+      cat <<EOF > "$WG_DIR/wg0.conf"
+      [Interface]
+      Address = 10.8.0.1/24
+      ListenPort = $WG_PORT
+      PrivateKey = $SERVER_PRIV_KEY
+      SaveConfig = false
+      PostUp = iptables -t nat -A POSTROUTING -o $DEFAULT_NIC -j MASQUERADE; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+      PostDown = iptables -t nat -D POSTROUTING -o $DEFAULT_NIC -j MASQUERADE; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+      # Peer: client1
+      [Peer]
+      PublicKey = $CLIENT1_PUB_KEY
+      AllowedIPs = 10.8.0.2/32
+      EOF
+      chmod 600 "$WG_DIR/wg0.conf"
+
+      # Generate initial client1.conf
+      cat <<EOF > "$WG_DIR/client1.conf"
+      [Interface]
+      PrivateKey = $CLIENT1_PRIV_KEY
+      Address = 10.8.0.2/32
+      DNS = 1.1.1.1, 1.0.0.1
+
+      [Peer]
+      PublicKey = $SERVER_PUB_KEY
+      Endpoint = $SERVER_PUB_IP:$WG_PORT
+      AllowedIPs = 0.0.0.0/0
+      PersistentKeepalive = 25
+      EOF
+      chmod 600 "$WG_DIR/client1.conf"
+
+      # Copy client configuration to admin user directory
+      cp "$WG_DIR/client1.conf" "$CLIENTS_DIR/client1.conf"
+      chown -R ${admin_username}:${admin_username} "$CLIENTS_DIR"
+      chmod 600 "$CLIENTS_DIR/client1.conf"
+
+      # Save endpoint info for helper scripts
+      echo "$SERVER_PUB_IP:$WG_PORT" > "$WG_DIR/endpoint.info"
+      chmod 600 "$WG_DIR/endpoint.info"
+
+      # Enable and start WireGuard systemd service
+      systemctl daemon-reload
+      systemctl enable wg-quick@wg0
+      systemctl restart wg-quick@wg0
+
+  - path: /usr/local/bin/add-wg-client
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      if [ "$#" -ne 1 ]; then
+        echo "Usage: sudo $0 <client-name>"
+        echo "Example: sudo $0 phone"
+        exit 1
+      fi
+
+      CLIENT_NAME="$1"
+      if [[ ! "$CLIENT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Error: Client name must contain only alphanumeric characters, underscores, and dashes."
+        exit 1
+      fi
+
+      WG_DIR="/etc/wireguard"
+      CLIENTS_DIR="/home/${admin_username}/wireguard-clients"
+
+      if [ "$EUID" -ne 0 ]; then
+        echo "Error: This script must be run as root (e.g. using sudo)."
+        exit 1
+      fi
+
+      if [ ! -f "$WG_DIR/wg0.conf" ] || [ ! -f "$WG_DIR/server_public.key" ]; then
+        echo "Error: WireGuard server is not initialized."
+        exit 1
+      fi
+
+      if [ -f "$CLIENTS_DIR/$CLIENT_NAME.conf" ] || grep -q "# Peer: $CLIENT_NAME\$" "$WG_DIR/wg0.conf"; then
+        echo "Error: Client '$CLIENT_NAME' already exists."
+        exit 1
+      fi
+
+      # Determine next IP octet
+      USED_IPS=$(grep -oE '10\.8\.0\.[0-9]+' "$WG_DIR/wg0.conf" | awk -F. '{print $4}' | sort -n)
+      NEXT_OCTET=2
+      for octet in $USED_IPS; do
+        if [ "$octet" -eq "$NEXT_OCTET" ]; then
+          NEXT_OCTET=$((NEXT_OCTET + 1))
+        fi
+      done
+
+      if [ "$NEXT_OCTET" -gt 254 ]; then
+        echo "Error: Subnet address pool exhausted."
+        exit 1
+      fi
+
+      CLIENT_IP="10.8.0.$NEXT_OCTET"
+      SERVER_PUB_KEY=$(cat "$WG_DIR/server_public.key")
+
+      if [ -f "$WG_DIR/endpoint.info" ]; then
+        ENDPOINT=$(cat "$WG_DIR/endpoint.info")
+      else
+        ENDPOINT="$(curl -s -4 ifconfig.me):${wireguard_port}"
+      fi
+
+      CLIENT_PRIV_KEY=$(wg genkey)
+      CLIENT_PUB_KEY=$(echo "$CLIENT_PRIV_KEY" | wg pubkey)
+
+      # Add peer dynamically to the live interface
+      wg set wg0 peer "$CLIENT_PUB_KEY" allowed-ips "$CLIENT_IP/32"
+
+      # Append peer to persistent configuration
+      cat <<EOF >> "$WG_DIR/wg0.conf"
+
+      # Peer: $CLIENT_NAME
+      [Peer]
+      PublicKey = $CLIENT_PUB_KEY
+      AllowedIPs = $CLIENT_IP/32
+      EOF
+
+      # Write client configuration file
+      CLIENT_CONF="$CLIENTS_DIR/$CLIENT_NAME.conf"
+      cat <<EOF > "$CLIENT_CONF"
+      [Interface]
+      PrivateKey = $CLIENT_PRIV_KEY
+      Address = $CLIENT_IP/32
+      DNS = 1.1.1.1, 1.0.0.1
+
+      [Peer]
+      PublicKey = $SERVER_PUB_KEY
+      Endpoint = $ENDPOINT
+      AllowedIPs = 0.0.0.0/0
+      PersistentKeepalive = 25
+      EOF
+
+      chown ${admin_username}:${admin_username} "$CLIENT_CONF"
+      chmod 600 "$CLIENT_CONF"
+
+      echo "================================================================="
+      echo " WireGuard client '$CLIENT_NAME' created successfully!"
+      echo " Assigned IP: $CLIENT_IP"
+      echo " Config file: $CLIENT_CONF"
+      echo "================================================================="
+      echo ""
+      echo "Scan the QR code below using your WireGuard mobile app:"
+      echo ""
+      qrencode -t ansiutf8 < "$CLIENT_CONF"
+      echo ""
+      echo "Configuration file saved to: $CLIENT_CONF"
+
+runcmd:
+  - [ /usr/local/bin/init-wireguard.sh ]
