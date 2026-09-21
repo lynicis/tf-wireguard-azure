@@ -119,6 +119,14 @@ write_files:
       CLIENT1_PRIV_KEY=$(cat "$WG_DIR/client1_private.key")
       CLIENT1_PUB_KEY=$(cat "$WG_DIR/client1_public.key")
 
+      if [ ! -f "$WG_DIR/client1_psk.key" ]; then
+        umask 077
+        wg genpsk > "$WG_DIR/client1_psk.key"
+        chmod 600 "$WG_DIR/client1_psk.key"
+      fi
+
+      CLIENT1_PSK=$(cat "$WG_DIR/client1_psk.key")
+
       # Generate wg0.conf
       cat <<EOF > "$WG_DIR/wg0.conf"
       [Interface]
@@ -133,6 +141,7 @@ write_files:
       [Peer]
       PublicKey = $CLIENT1_PUB_KEY
       AllowedIPs = 10.8.0.2/32
+      PresharedKey = $CLIENT1_PSK
       EOF
       chmod 600 "$WG_DIR/wg0.conf"
 
@@ -148,6 +157,7 @@ write_files:
       Endpoint = $SERVER_PUB_IP:$WG_PORT
       AllowedIPs = 0.0.0.0/0
       PersistentKeepalive = 25
+      PresharedKey = $CLIENT1_PSK
       EOF
       chmod 600 "$WG_DIR/client1.conf"
 
@@ -227,9 +237,14 @@ write_files:
 
       CLIENT_PRIV_KEY=$(wg genkey)
       CLIENT_PUB_KEY=$(echo "$CLIENT_PRIV_KEY" | wg pubkey)
+      umask 077
+      wg genpsk > "$WG_DIR/$${CLIENT_NAME}_psk.key"
+      chmod 600 "$WG_DIR/$${CLIENT_NAME}_psk.key"
+      chown root:root "$WG_DIR/$${CLIENT_NAME}_psk.key"
+      CLIENT_PSK=$(cat "$WG_DIR/$${CLIENT_NAME}_psk.key")
 
       # Add peer dynamically to the live interface
-      wg set wg0 peer "$CLIENT_PUB_KEY" allowed-ips "$CLIENT_IP/32"
+      wg set wg0 peer "$CLIENT_PUB_KEY" allowed-ips "$CLIENT_IP/32" preshared-key <(cat "$WG_DIR/$${CLIENT_NAME}_psk.key")
 
       # Append peer to persistent configuration
       cat <<EOF >> "$WG_DIR/wg0.conf"
@@ -238,6 +253,7 @@ write_files:
       [Peer]
       PublicKey = $CLIENT_PUB_KEY
       AllowedIPs = $CLIENT_IP/32
+      PresharedKey = $CLIENT_PSK
       EOF
 
       # Write client configuration file
@@ -253,6 +269,7 @@ write_files:
       Endpoint = $ENDPOINT
       AllowedIPs = 0.0.0.0/0
       PersistentKeepalive = 25
+      PresharedKey = $CLIENT_PSK
       EOF
 
       chown ${admin_username}:${admin_username} "$CLIENT_CONF"
