@@ -9,6 +9,8 @@ packages:
   - iptables
   - qrencode
   - curl
+  - unbound
+  - unbound-anchor
 
 write_files:
   - path: /etc/sysctl.d/99-wireguard.conf
@@ -17,6 +19,58 @@ write_files:
     content: |
       net.ipv4.ip_forward = 1
       net.ipv6.conf.all.forwarding = 1
+
+  - path: /etc/unbound/unbound.conf.d/pi-hole.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      server:
+        verbosity: 0
+        interface: 127.0.0.1
+        port: 5335
+        do-ip4: yes
+        do-udp: yes
+        do-tcp: yes
+        do-ip6: no
+        prefer-ip6: no
+        root-hints: /var/lib/unbound/root.hints
+        harden-glue: yes
+        harden-dnssec-stripped: yes
+        use-caps-for-id: no
+        edns-buffer-size: 1232
+        prefetch: yes
+        num-threads: 1
+        so-rcvbuf: 1m
+        private-address: 192.168.0.0/16
+        private-address: 169.254.0.0/16
+        private-address: 172.16.0.0/12
+        private-address: 10.0.0.0/8
+        private-address: fd00::/8
+        private-address: fe80::/10
+        logfile: ""
+        log-queries: no
+        log-replies: no
+
+  - path: /etc/pihole/setupVars.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      PIHOLE_INTERFACE=10.8.0.1
+      IPV4_ADDRESS=10.8.0.1/24
+      QUERY_LOGGING=false
+      INSTALL_WEB_SERVER=false
+      INSTALL_WEB_INTERFACE=false
+      LIGHTTPD_ENABLED=false
+      BLOCKING_ENABLED=true
+      PIHOLE_DNS_1=127.0.0.1#5335
+      PIHOLE_DNS_2=
+
+  - path: /etc/pihole/pihole-FTL.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      PRIVACYLEVEL=3
+      DBFILE=
 
   - path: /usr/local/bin/init-wireguard.sh
     owner: root:root
@@ -87,7 +141,7 @@ write_files:
       [Interface]
       PrivateKey = $CLIENT1_PRIV_KEY
       Address = 10.8.0.2/32
-      DNS = 1.1.1.1, 1.0.0.1
+      DNS = 10.8.0.1
 
       [Peer]
       PublicKey = $SERVER_PUB_KEY
@@ -192,7 +246,7 @@ write_files:
       [Interface]
       PrivateKey = $CLIENT_PRIV_KEY
       Address = $CLIENT_IP/32
-      DNS = 1.1.1.1, 1.0.0.1
+      DNS = 10.8.0.1
 
       [Peer]
       PublicKey = $SERVER_PUB_KEY
@@ -217,4 +271,13 @@ write_files:
       echo "Configuration file saved to: $CLIENT_CONF"
 
 runcmd:
+  # --- Unbound: download root hints and start service ---
+  - curl -o /var/lib/unbound/root.hints https://www.internic.net/domain/named.root
+  - systemctl enable unbound
+  - systemctl start unbound
+  # --- Pi-hole: run unattended installer (setupVars.conf already written) ---
+  - curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended
+  # --- Pi-hole: restart pihole-FTL so pihole-FTL.conf no-log overrides take effect ---
+  - systemctl restart pihole-FTL
+  # --- WireGuard initialisation ---
   - [ /usr/local/bin/init-wireguard.sh ]
